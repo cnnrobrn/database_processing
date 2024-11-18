@@ -100,17 +100,20 @@ async def poll_database():
                                 print(result.get('url'))
                                 if not result.get('url'):
                                     continue
-                                new_link = Link(
-                                    item_id=item_id,
-                                    url=result['url'],
-                                    title=result['title'],
-                                    photo_url=result['thumbnail'],
-                                    price=result['price'],
-                                    rating=result['rating'],
-                                    reviews_count=result['reviews_count'],
-                                    merchant_name=result['merchant_name']
-                                )
-                                session.add(new_link)
+                                try:
+                                    new_link = Link(
+                                        item_id=item_id,
+                                        url=result['url'],
+                                        title=result['title'],
+                                        photo_url=result['thumbnail'],
+                                        price=result['price'],
+                                        rating=result['rating'],
+                                        reviews_count=result['reviews_count'],
+                                        merchant_name=result['merchant_name']
+                                    )
+                                    session.add(new_link)
+                                except Exception as e:
+                                    print(f"Error adding new link: {e}")
                                 print("link added")
 
                 # Update the last_checked_id to the highest `id` processed
@@ -198,11 +201,11 @@ async def get_first_seller_link(data):
     try:
         # Navigate through the JSON structure to find the seller_link
         first_result = data["results"][0]
-        print(f"first_result{first_result}")
+        #print(f"first_result{first_result}")
         first_online_pricing = first_result["content"]["pricing"]["online"][0]
-        print(f"first_online_pricing{first_online_pricing}")
+        #print(f"first_online_pricing{first_online_pricing}")
         seller_link = first_online_pricing["seller_link"]
-        print(f"seller_link{seller_link}")
+        #print(f"seller_link{seller_link}")
         return seller_link
     except (KeyError, IndexError):
         return "Seller link not found"
