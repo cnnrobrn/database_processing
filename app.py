@@ -52,7 +52,7 @@ async def poll_database():
             async with async_session() as session:
                 # Use `text()` to wrap the raw SQL query
                 query = text("""
-                SELECT id, Amazon_Search 
+                SELECT id, search 
                 FROM items 
                 WHERE created_at > :last_checked
                 """)
@@ -63,15 +63,15 @@ async def poll_database():
                 if new_records:
                     async with session.begin():
                         for record in new_records:
-                            item_id, amazon_search = record
-                            processed_search = oxy_search(amazon_search)
+                            id, search = record
+                            processed_search = oxy_search(search)
 
                             # Add new links to the database
                             for result in processed_search:
                                 if not result.get('url'):
                                     continue
                                 new_link = Link(
-                                    item_id=item_id,
+                                    item_id=id,
                                     url=result['url'],
                                     title=result['title'],
                                     photo_url=result['thumbnail'],
