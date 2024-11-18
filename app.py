@@ -211,7 +211,8 @@ async def get_first_seller_link(data):
         #print(f"seller_link{seller_link}")
         return seller_link
     except (KeyError, IndexError):
-        return "Seller link not found"
+        return None
+    
 
 # Get and print the first seller link
 
