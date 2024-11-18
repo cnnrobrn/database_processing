@@ -223,6 +223,7 @@ async def get_seller_link(product_id):
         'parse': True,
         'query': product_id
     }
+    print(f"Getting seller link for product_id: {product_id}")
 
     try:
         response = requests.post(
