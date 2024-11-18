@@ -157,6 +157,7 @@ async def oxy_search(query):
             timeout=45
         )
         data = response.json()
+        print(data)
         organic_results = data["results"][0]["content"]["results"]["organic"][:30]
         print(organic_results)
         return [
@@ -165,7 +166,7 @@ async def oxy_search(query):
                 "price": result.get("price"),
                 "title": result.get("title"),
                 "thumbnail": result.get("thumbnail"),
-                "url": result.get("url"),
+                "url": get_seller_link(result.get("product_id")),
                 "rating": result.get("rating"),
                 "reviews_count": result.get("reviews_count"),
                 "merchant_name": result.get("merchant", {}).get("name")
@@ -189,3 +190,39 @@ async def get_last_checked_id():
         except Exception as e:
             print(f"Error fetching last_checked_id: {e}")
             return 0
+
+
+async def get_first_seller_link(data):
+    try:
+        # Navigate through the JSON structure to find the seller_link
+        first_result = data["results"][0]
+        first_online_pricing = first_result["content"]["pricing"]["online"][0]
+        seller_link = first_online_pricing["seller_link"]
+        return seller_link
+    except (KeyError, IndexError):
+        return "Seller link not found"
+
+# Get and print the first seller link
+
+async def get_seller_link(product_id):
+    payload = {
+        'source': 'google_shopping_product',
+        'domain': 'com',
+        'pages': 1,
+        'parse': True,
+        'query': product_id
+    }
+
+    try:
+        response = requests.post(
+            'https://realtime.oxylabs.io/v1/queries',
+            auth=(OXY_USERNAME, OXY_PASSWORD),
+            json=payload,
+            timeout=45
+        )
+        data = response.json()
+        seller_link = await get_first_seller_link(data)
+        print(seller_link)
+        return seller_link
+    except Exception as e:
+        print(f"Error during Oxylabs API call: {e}")
