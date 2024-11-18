@@ -49,6 +49,8 @@ async def get_session():
     Ensures proper session lifecycle management.
     """
     async with async_session() as session:
+        print(f"Transaction state: {session.in_transaction()}")
+        print(f"Session ID: {id(session)}")
         try:
             yield session
         except Exception as e:
