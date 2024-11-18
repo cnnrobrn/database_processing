@@ -68,15 +68,18 @@ async def poll_database():
 
     while True:
         try:
-            # Fetch new records
+            # Create a new session and explicitly use the connection for reading
             async with get_session() as session:
-                query = text("""
-                SELECT id, search 
-                FROM items 
-                WHERE id > :last_checked_id
-                """).execution_options(isolation_level="AUTOCOMMIT")  # Prevent implicit transactions for reads
-                result = await session.execute(query, {"last_checked_id": last_checked_id})
-                new_records = result.fetchall()
+                async with session.begin():
+                    connection = await session.connection()
+                    # Query to find new records in the `items` table
+                    query = text("""
+                    SELECT id, search 
+                    FROM items 
+                    WHERE id > :last_checked_id
+                    """)
+                    result = await connection.execute(query, {"last_checked_id": last_checked_id})
+                    new_records = result.fetchall()
 
             # Process records if they exist
             if new_records:
@@ -111,6 +114,7 @@ async def poll_database():
         finally:
             # Sleep before the next polling cycle
             await asyncio.sleep(1)  # Adjust the interval as needed
+
 
 
 @app.on_event("startup")
