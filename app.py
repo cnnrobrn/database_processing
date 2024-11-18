@@ -9,8 +9,9 @@ import requests
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship, sessionmaker
+from flask import Flask
 
-
+app = Flask(__name__)
 
 db = SQLAlchemy(app)
 
@@ -19,6 +20,10 @@ load_dotenv()
 DATABASE_URL = os.getenv('DATABASE_URL')
 OXY_USERNAME= os.getenv("OXY_USERNAME")
 OXY_PASSWORD= os.getenv("OXY_PASSWORD")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 
 class Link(db.Model):
     __tablename__ = 'links'
