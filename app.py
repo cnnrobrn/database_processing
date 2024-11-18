@@ -165,7 +165,8 @@ async def oxy_search(query):
         #print(data)
         organic_results = data["results"][0]["content"]["results"]["organic"][:30]
         #print(organic_results)
-        return [
+        print('Getting seller links')
+        records = [
             {
                 "pos": result.get("pos"),
                 "price": result.get("price"),
@@ -178,6 +179,8 @@ async def oxy_search(query):
             }
             for result in organic_results
         ]
+        print(records)
+        return records
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
