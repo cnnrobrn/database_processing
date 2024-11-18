@@ -9,6 +9,8 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 import requests
+from contextlib import asynccontextmanager
+
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +40,24 @@ class Link(Base):
     rating = Column(Float, nullable=True)
     reviews_count = Column(Integer, nullable=True)
     merchant_name = Column(String, nullable=True)
+    
+    
+@asynccontextmanager
+async def get_session():
+    """
+    Provides a new `AsyncSession` for database operations.
+    Ensures proper session lifecycle management.
+    """
+    async with async_session() as session:
+        try:
+            yield session
+        except Exception as e:
+            print(f"Error in session: {e}")
+            raise
+        finally:
+            # Ensure the session is closed
+            await session.close()
+
 
 # Global variable to track the last time the database was checked
 last_checked_id = 0  # Start from 0 or the last processed `id`
@@ -51,8 +71,7 @@ async def poll_database():
 
     while True:
         try:
-            # Create a new session for each polling cycle
-            async with async_session() as session:
+            async with get_session() as session:
                 # Query to find new records in the `items` table
                 query = text("""
                 SELECT id, search 
@@ -152,12 +171,13 @@ async def get_last_checked_id():
     """
     Get the highest `item_id` from the `links` table.
     """
-    async with async_session() as session:
+    async with get_session() as session:
         try:
             result = await session.execute(text("SELECT COALESCE(MAX(item_id), 0) FROM links"))
             return result.scalar()
         except Exception as e:
             print(f"Error fetching last_checked_id: {e}")
             return 0
+
 
 
