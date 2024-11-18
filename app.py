@@ -166,7 +166,7 @@ async def oxy_search(query):
                 "price": result.get("price"),
                 "title": result.get("title"),
                 "thumbnail": result.get("thumbnail"),
-                "url": get_seller_link(result.get("product_id")),
+                "url": await get_seller_link(result.get("product_id")),
                 "rating": result.get("rating"),
                 "reviews_count": result.get("reviews_count"),
                 "merchant_name": result.get("merchant", {}).get("name")
