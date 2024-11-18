@@ -40,8 +40,7 @@ class Link(Base):
     rating = Column(Float, nullable=True)
     reviews_count = Column(Integer, nullable=True)
     merchant_name = Column(String, nullable=True)
-    
-    
+
 @asynccontextmanager
 async def get_session():
     """
@@ -56,10 +55,6 @@ async def get_session():
         except Exception as e:
             print(f"Error in session: {e}")
             raise
-        finally:
-            # Ensure the session is closed
-            await session.close()
-
 
 # Global variable to track the last time the database was checked
 last_checked_id = 0  # Start from 0 or the last processed `id`
@@ -73,19 +68,20 @@ async def poll_database():
 
     while True:
         try:
+            # Fetch new records
             async with get_session() as session:
-                # Query to find new records in the `items` table
                 query = text("""
                 SELECT id, search 
                 FROM items 
                 WHERE id > :last_checked_id
-                """)
+                """).execution_options(isolation_level="AUTOCOMMIT")  # Prevent implicit transactions for reads
                 result = await session.execute(query, {"last_checked_id": last_checked_id})
                 new_records = result.fetchall()
 
-                # If new records are found, process them
-                if new_records:
-                    # Process records within a transaction
+            # Process records if they exist
+            if new_records:
+                async with get_session() as session:
+                    # Start a transaction for the write operation
                     async with session.begin():
                         for record in new_records:
                             item_id, search = record
@@ -107,8 +103,8 @@ async def poll_database():
                                 )
                                 session.add(new_link)
 
-                    # Update the last_checked_id to the highest `id` processed
-                    last_checked_id = max(record[0] for record in new_records)
+                # Update the last_checked_id to the highest `id` processed
+                last_checked_id = max(record[0] for record in new_records)
 
         except Exception as e:
             print(f"Error during database polling: {e}")
@@ -168,18 +164,16 @@ def oxy_search(query):
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
-    
+
 async def get_last_checked_id():
     """
     Get the highest `item_id` from the `links` table.
     """
     async with get_session() as session:
         try:
-            result = await session.execute(text("SELECT COALESCE(MAX(item_id), 0) FROM links"))
+            query = text("SELECT COALESCE(MAX(item_id), 0) FROM links").execution_options(isolation_level="AUTOCOMMIT")
+            result = await session.execute(query)
             return result.scalar()
         except Exception as e:
             print(f"Error fetching last_checked_id: {e}")
             return 0
-
-
-
