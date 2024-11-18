@@ -159,9 +159,9 @@ async def oxy_search(query):
             timeout=45
         )
         data = response.json()
-        print(data)
+        #print(data)
         organic_results = data["results"][0]["content"]["results"]["organic"][:30]
-        print(organic_results)
+        #print(organic_results)
         return [
             {
                 "pos": result.get("pos"),
@@ -198,8 +198,11 @@ async def get_first_seller_link(data):
     try:
         # Navigate through the JSON structure to find the seller_link
         first_result = data["results"][0]
+        print(f"first_result{first_result}")
         first_online_pricing = first_result["content"]["pricing"]["online"][0]
+        print(f"first_online_pricing{first_online_pricing}")
         seller_link = first_online_pricing["seller_link"]
+        print(f"seller_link{seller_link}")
         return seller_link
     except (KeyError, IndexError):
         return "Seller link not found"
@@ -223,7 +226,6 @@ async def get_seller_link(product_id):
             timeout=45
         )
         data = response.json()
-        print(data)
         seller_link = await get_first_seller_link(data)
         print(seller_link)
         return seller_link
