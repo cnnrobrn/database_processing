@@ -1,9 +1,6 @@
-
 fastapi
-sqlalchemy
+sqlalchemy[asyncio]
 asyncpg
+uvicorn
 python-dotenv
-flask_sqlalchemy
-sqlalchemy
-Flask
-Gunicorn
+requests
