@@ -80,6 +80,7 @@ async def poll_database():
                     """)
                     result = await connection.execute(query, {"last_checked_id": last_checked_id})
                     new_records = result.fetchall()
+                    last_checked_id = max(record[0] for record in new_records) if new_records else last_checked_id
                     print(f"last checked id: {last_checked_id}")
                     print(f"New records: {new_records}")
 
@@ -113,7 +114,7 @@ async def poll_database():
                                 print("link added")
 
                 # Update the last_checked_id to the highest `id` processed
-                last_checked_id = max(record[0] for record in new_records)
+                
 
         except Exception as e:
             print(f"Error during database polling: {e}")
