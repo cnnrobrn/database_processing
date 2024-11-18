@@ -91,9 +91,9 @@ async def poll_database():
 
         except Exception as e:
             print(f"Error during database polling: {e}")
-
-        # Sleep before the next polling cycle
-        await asyncio.sleep(1)  # Adjust the interval as needed
+        finally:
+            # Sleep before the next polling cycle
+            await asyncio.sleep(1)  # Adjust the interval as needed
 
 
 @app.on_event("startup")
@@ -150,16 +150,14 @@ def oxy_search(query):
     
 async def get_last_checked_id():
     """
-    Get the highest `item_id` from the `links` table. 
-    If the `links` table is empty, return 0.
+    Get the highest `item_id` from the `links` table.
     """
-    try:
-        async with async_session() as session:
-            # Query to find the maximum `item_id`
+    async with async_session() as session:
+        try:
             result = await session.execute(text("SELECT COALESCE(MAX(item_id), 0) FROM links"))
-            max_item_id = result.scalar()
-            return max_item_id
-    except Exception as e:
-        print(f"Error fetching last_checked_id from links table: {e}")
-        return 0  # Fallback to 0 if there is any issue
+            return result.scalar()
+        except Exception as e:
+            print(f"Error fetching last_checked_id: {e}")
+            return 0
+
 
