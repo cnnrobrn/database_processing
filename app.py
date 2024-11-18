@@ -141,6 +141,149 @@ async def root():
     """
     return {"message": "Polling the database for new records in the items table"}
 
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy.sql import text
+from sqlalchemy.ext.declarative import declarative_base
+import asyncio
+from datetime import datetime
+import os
+from dotenv import load_dotenv
+import requests
+from contextlib import asynccontextmanager
+
+
+# Load environment variables
+load_dotenv()
+
+# Railway database reference
+DATABASE_URL = os.getenv('DATABASE_URL', '').replace("postgresql://", "postgresql+asyncpg://")
+OXY_USERNAME = os.getenv("OXY_USERNAME")
+OXY_PASSWORD = os.getenv("OXY_PASSWORD")
+
+# FastAPI app instance
+app = FastAPI()
+
+# Database configuration
+Base = declarative_base()
+engine = create_async_engine(DATABASE_URL, echo=True)
+async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+# Database Models
+class Link(Base):
+    __tablename__ = 'links'
+    id = Column(Integer, primary_key=True)
+    item_id = Column(Integer, ForeignKey('items.id'), nullable=False)
+    photo_url = Column(String, nullable=True)
+    url = Column(String, nullable=False)
+    price = Column(String, nullable=True)
+    title = Column(String, nullable=False)
+    rating = Column(Float, nullable=True)
+    reviews_count = Column(Integer, nullable=True)
+    merchant_name = Column(String, nullable=True)
+
+@asynccontextmanager
+async def get_session():
+    """
+    Provides a new `AsyncSession` for database operations.
+    Ensures proper session lifecycle management.
+    """
+    async with async_session() as session:
+        print(f"Transaction state: {session.in_transaction()}")
+        print(f"Session ID: {id(session)}")
+        try:
+            yield session
+        except Exception as e:
+            print(f"Error in session: {e}")
+            raise
+
+# Global variable to track the last time the database was checked
+last_checked_id = 0  # Start from 0 or the last processed `id`
+
+async def poll_database():
+    """
+    Continuously polls the database for new records in the `items` table.
+    """
+    global last_checked_id
+    last_checked_id = await get_last_checked_id()  # Initialize from `links` table or fallback to 0
+
+    while True:
+        try:
+            # Create a new session and explicitly use the connection for reading
+            async with get_session() as session:
+                async with session.begin():
+                    connection = await session.connection()
+                    # Query to find new records in the `items` table
+                    query = text("""
+                    SELECT id, search 
+                    FROM items 
+                    WHERE id > :last_checked_id
+                    """)
+                    result = await connection.execute(query, {"last_checked_id": last_checked_id})
+                    new_records = result.fetchall()
+                    last_checked_id = max(record[0] for record in new_records) if new_records else last_checked_id
+                    print(f"last checked id: {last_checked_id}")
+                    print(f"New records: {new_records}")
+
+            # Process records if they exist
+            if new_records:
+                print('new records recieved')
+                async with get_session() as session:
+                    # Start a transaction for the write operation
+                    async with session.begin():
+                        for record in new_records:
+                            item_id, search = record
+                            processed_search = await oxy_search(search)
+
+                            # Add new links to the `links` table
+                            for result in processed_search:
+                                print("adding link")
+                                print(result.get('url'))
+                                if not result.get('url'):
+                                    continue
+                                try:
+                                    new_link = Link(
+                                        item_id=item_id,
+                                        url=result['url'],
+                                        title=result['title'],
+                                        photo_url=result['thumbnail'],
+                                        price=result['price'],
+                                        rating=result['rating'],
+                                        reviews_count=result['reviews_count'],
+                                        merchant_name=result['merchant_name']
+                                    )
+                                    session.add(new_link)
+                                except Exception as e:
+                                    print(f"Error adding new link: {e}")
+                                print("link added")
+
+                # Update the last_checked_id to the highest `id` processed
+                
+
+        except Exception as e:
+            print(f"Error during database polling: {e}")
+        finally:
+            # Sleep before the next polling cycle
+            await asyncio.sleep(1)  # Adjust the interval as needed
+
+
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Starts the database polling task when the FastAPI app starts.
+    """
+    asyncio.create_task(poll_database())
+
+@app.get("/")
+async def root():
+    """
+    Root endpoint to verify that the service is running.
+    """
+    return {"message": "Polling the database for new records in the items table"}
+
 async def oxy_search(query):
     """
     Sends a query to the Oxylabs API and returns structured search results.
