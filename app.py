@@ -25,6 +25,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 
+
 class Link(db.Model):
     __tablename__ = 'links'
     id = db.Column(db.Integer, primary_key=True)
