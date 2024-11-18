@@ -95,6 +95,7 @@ async def poll_database():
                             # Add new links to the `links` table
                             for result in processed_search:
                                 print("adding link")
+                                print(result.get('url'))
                                 if not result.get('url'):
                                     continue
                                 new_link = Link(
