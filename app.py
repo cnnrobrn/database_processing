@@ -80,9 +80,11 @@ async def poll_database():
                     """)
                     result = await connection.execute(query, {"last_checked_id": last_checked_id})
                     new_records = result.fetchall()
+                    print(f"New records: {new_records}")
 
             # Process records if they exist
             if new_records:
+                print('new records recieved')
                 async with get_session() as session:
                     # Start a transaction for the write operation
                     async with session.begin():
@@ -135,6 +137,7 @@ def oxy_search(query):
     """
     Sends a query to the Oxylabs API and returns structured search results.
     """
+    print('oxy_search')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -173,6 +176,7 @@ async def get_last_checked_id():
     """
     Get the highest `item_id` from the `links` table.
     """
+    print('get_last_checked_id')
     async with get_session() as session:
         try:
             query = text("SELECT COALESCE(MAX(item_id), 0) FROM links").execution_options(isolation_level="AUTOCOMMIT")
