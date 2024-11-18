@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy.sql import text
 from sqlalchemy.ext.declarative import declarative_base
 import asyncio
 from datetime import datetime
@@ -49,12 +50,12 @@ async def poll_database():
     while True:
         try:
             async with async_session() as session:
-                # Query to find new records in the items table
-                query = """
+                # Use `text()` to wrap the raw SQL query
+                query = text("""
                 SELECT id, Amazon_Search 
                 FROM items 
                 WHERE created_at > :last_checked
-                """
+                """)
                 result = await session.execute(query, {"last_checked": last_checked})
                 new_records = result.fetchall()
 
@@ -88,7 +89,7 @@ async def poll_database():
             print(f"Error during database polling: {e}")
 
         # Sleep before the next polling cycle
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 @app.on_event("startup")
 async def startup_event():
