@@ -140,6 +140,7 @@ async def oxy_search(query):
     """
     Sends a query to the Oxylabs API and returns structured search results.
     """
+    print('oxy_search')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -157,6 +158,7 @@ async def oxy_search(query):
         )
         data = response.json()
         organic_results = data["results"][0]["content"]["results"]["organic"][:30]
+        print(organic_results)
         return [
             {
                 "pos": result.get("pos"),
