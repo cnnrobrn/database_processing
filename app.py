@@ -121,7 +121,7 @@ def oxy_search(query):
             'https://realtime.oxylabs.io/v1/queries',
             auth=(OXY_USERNAME, OXY_PASSWORD),
             json=payload,
-            timeout=10
+            timeout=45
         )
         data = response.json()
         organic_results = data["results"][0]["content"]["results"]["organic"][:30]
