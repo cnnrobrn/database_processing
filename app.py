@@ -60,9 +60,6 @@ async def get_session():
 last_checked_id = 0  # Start from 0 or the last processed `id`
 
 async def poll_database():
-    """
-    Continuously polls the database for new records in the `items` table.
-    """
     global last_checked_id
     last_checked_id = await get_last_checked_id()  # Initialize from `links` table or fallback to 0
 
@@ -80,17 +77,15 @@ async def poll_database():
                     """)
                     result = await connection.execute(query, {"last_checked_id": last_checked_id})
                     new_records = result.fetchall()
-                    print(f"New records: {new_records}")
 
             # Process records if they exist
             if new_records:
-                print('new records recieved')
                 async with get_session() as session:
                     # Start a transaction for the write operation
                     async with session.begin():
                         for record in new_records:
                             item_id, search = record
-                            processed_search = oxy_search(search)
+                            processed_search = await oxy_search(search)  # Now using await to handle async
 
                             # Add new links to the `links` table
                             for result in processed_search:
@@ -119,6 +114,7 @@ async def poll_database():
 
 
 
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -133,11 +129,9 @@ async def root():
     """
     return {"message": "Polling the database for new records in the items table"}
 
-def oxy_search(query):
-    """
-    Sends a query to the Oxylabs API and returns structured search results.
-    """
-    print('oxy_search')
+import aiohttp
+
+async def oxy_search(query):
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -146,31 +140,33 @@ def oxy_search(query):
         'query': query
     }
 
-    try:
-        response = requests.post(
-            'https://realtime.oxylabs.io/v1/queries',
-            auth=(OXY_USERNAME, OXY_PASSWORD),
-            json=payload,
-            timeout=45
-        )
-        data = response.json()
-        organic_results = data["results"][0]["content"]["results"]["organic"][:30]
-        return [
-            {
-                "pos": result.get("pos"),
-                "price": result.get("price"),
-                "title": result.get("title"),
-                "thumbnail": result.get("thumbnail"),
-                "url": result.get("url"),
-                "rating": result.get("rating"),
-                "reviews_count": result.get("reviews_count"),
-                "merchant_name": result.get("merchant", {}).get("name")
-            }
-            for result in organic_results
-        ]
-    except Exception as e:
-        print(f"Error during Oxylabs API call: {e}")
-        return []
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                'https://realtime.oxylabs.io/v1/queries',
+                auth=aiohttp.BasicAuth(OXY_USERNAME, OXY_PASSWORD),
+                json=payload,
+                timeout=45
+            ) as response:
+                data = await response.json()
+                organic_results = data["results"][0]["content"]["results"]["organic"][:30]
+                return [
+                    {
+                        "pos": result.get("pos"),
+                        "price": result.get("price"),
+                        "title": result.get("title"),
+                        "thumbnail": result.get("thumbnail"),
+                        "url": result.get("url"),
+                        "rating": result.get("rating"),
+                        "reviews_count": result.get("reviews_count"),
+                        "merchant_name": result.get("merchant", {}).get("name")
+                    }
+                    for result in organic_results
+                ]
+        except Exception as e:
+            print(f"Error during Oxylabs API call: {e}")
+            return []
+
 
 async def get_last_checked_id():
     """
