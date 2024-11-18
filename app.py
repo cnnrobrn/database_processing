@@ -94,6 +94,7 @@ async def poll_database():
 
                             # Add new links to the `links` table
                             for result in processed_search:
+                                print("adding link")
                                 if not result.get('url'):
                                     continue
                                 new_link = Link(
@@ -107,6 +108,7 @@ async def poll_database():
                                     merchant_name=result['merchant_name']
                                 )
                                 session.add(new_link)
+                                print("link added")
 
                 # Update the last_checked_id to the highest `id` processed
                 last_checked_id = max(record[0] for record in new_records)
