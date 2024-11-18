@@ -51,7 +51,7 @@ async def poll_database():
 
     while True:
         try:
-            # Use a new session for each polling iteration
+            # Create a new session for each polling cycle
             async with async_session() as session:
                 # Query to find new records in the `items` table
                 query = text("""
@@ -64,7 +64,7 @@ async def poll_database():
 
                 # If new records are found, process them
                 if new_records:
-                    # Start a transaction for adding new links
+                    # Process records within a transaction
                     async with session.begin():
                         for record in new_records:
                             item_id, search = record
