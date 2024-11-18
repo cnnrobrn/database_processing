@@ -223,6 +223,7 @@ async def get_seller_link(product_id):
             timeout=45
         )
         data = response.json()
+        print(data)
         seller_link = await get_first_seller_link(data)
         print(seller_link)
         return seller_link
