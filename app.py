@@ -25,7 +25,6 @@ app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 
-
 class Link(db.Model):
     __tablename__ = 'links'
     id = db.Column(db.Integer, primary_key=True)
@@ -95,6 +94,7 @@ async def poll_database():
 
 @app.on_event("startup")
 async def startup_event():
+    
     """
     Starts the database polling task when the FastAPI app starts.
     """
