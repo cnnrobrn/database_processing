@@ -40,38 +40,40 @@ class Link(Base):
     merchant_name = Column(String, nullable=True)
 
 # Global variable to track the last time the database was checked
-last_checked = datetime.utcnow()
+last_checked_id = 0  # Start from 0 or the last processed `id`
 
 async def poll_database():
     """
-    Continuously polls the database for new records in the items table.
+    Continuously polls the database for new records in the `items` table.
     """
-    global last_checked
+    global last_checked_id
+    last_checked_id = await get_last_checked_id()  # Initialize from `links` table or fallback to 0
+
     while True:
         try:
             async with async_session() as session:
-                # Use `text()` to wrap the raw SQL query
+                # Query to find new records in the `items` table
                 query = text("""
                 SELECT id, search 
                 FROM items 
-                WHERE created_at > :last_checked
+                WHERE id > :last_checked_id
                 """)
-                result = await session.execute(query, {"last_checked": last_checked})
+                result = await session.execute(query, {"last_checked_id": last_checked_id})
                 new_records = result.fetchall()
 
                 # If new records are found, process them
                 if new_records:
                     async with session.begin():
                         for record in new_records:
-                            id, search = record
+                            item_id, search = record
                             processed_search = oxy_search(search)
 
-                            # Add new links to the database
+                            # Add new links to the `links` table
                             for result in processed_search:
                                 if not result.get('url'):
                                     continue
                                 new_link = Link(
-                                    item_id=id,
+                                    item_id=item_id,
                                     url=result['url'],
                                     title=result['title'],
                                     photo_url=result['thumbnail'],
@@ -82,14 +84,15 @@ async def poll_database():
                                 )
                                 session.add(new_link)
 
-                    # Update the last_checked timestamp
-                    last_checked = datetime.utcnow()
+                    # Update the last_checked_id to the highest `id` processed
+                    last_checked_id = max(record[0] for record in new_records)
 
         except Exception as e:
             print(f"Error during database polling: {e}")
 
         # Sleep before the next polling cycle
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # Adjust the interval as needed
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -142,4 +145,19 @@ def oxy_search(query):
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
+    
+async def get_last_checked_id():
+    """
+    Get the highest `item_id` from the `links` table. 
+    If the `links` table is empty, return 0.
+    """
+    try:
+        async with async_session() as session:
+            # Query to find the maximum `item_id`
+            result = await session.execute(text("SELECT COALESCE(MAX(item_id), 0) FROM links"))
+            max_item_id = result.scalar()
+            return max_item_id
+    except Exception as e:
+        print(f"Error fetching last_checked_id from links table: {e}")
+        return 0  # Fallback to 0 if there is any issue
 
