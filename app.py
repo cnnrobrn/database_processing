@@ -80,6 +80,7 @@ async def poll_database():
                     """)
                     result = await connection.execute(query, {"last_checked_id": last_checked_id})
                     new_records = result.fetchall()
+                    print(f"last checked id: {last_checked_id}")
                     print(f"New records: {new_records}")
 
             # Process records if they exist
