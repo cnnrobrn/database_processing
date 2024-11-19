@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, select
 from sqlalchemy.sql import text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -10,6 +10,8 @@ import os
 from dotenv import load_dotenv
 import httpx
 from contextlib import asynccontextmanager
+from typing import List, Optional
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -22,10 +24,16 @@ OXY_PASSWORD = os.getenv("OXY_PASSWORD")
 # FastAPI app instance
 app = FastAPI()
 
-
 # Database configuration
 Base = declarative_base()
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    pool_size=20,  # Adjust based on your needs
+    max_overflow=10,
+    pool_timeout=30,
+    pool_pre_ping=True  # Enable connection health checks
+)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # Database Models
@@ -33,10 +41,10 @@ class Item(Base):
     __tablename__ = 'items'
     id = Column(Integer, primary_key=True)
     outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
-    description = Column(String, nullable=True)  # Change to String to handle longer descriptions
-    search = Column(String, nullable=True)  # Change to String to handle longer descriptions
+    description = Column(String, nullable=True)
+    search = Column(String, nullable=True)
+    processed_at = Column(Float, nullable=True)  # New column to track processing
     links = relationship('Link', backref='item', lazy=True)
-
 
 class Link(Base):
     __tablename__ = 'links'
@@ -55,69 +63,135 @@ async def get_session():
     async with async_session() as session:
         try:
             yield session
-        except Exception as e:
-            print(f"Error in session: {e}")
-            raise
+        finally:
+            await session.close()
 
-# Global variable to track the last time the database was checked
-last_checked_id = 0
+async def process_item_batch(items: List[Item], session: AsyncSession):
+    """Process a batch of items concurrently while maintaining order"""
+    tasks = []
+    for item in items:
+        if not item.search:
+            continue
+        task = asyncio.create_task(oxy_search(item.search))
+        tasks.append((item.id, task))
+    
+    for item_id, task in tasks:
+        try:
+            search_results = await task
+            if search_results:
+                # Add all links in a single transaction
+                link_objects = []
+                for result in search_results:
+                    if not result.get('url'):
+                        continue
+                    link = Link(
+                        item_id=item_id,
+                        url=result['url'],
+                        title=result['title'],
+                        photo_url=result['thumbnail'],
+                        price=result['price_str'],
+                        rating=result['rating'],
+                        reviews_count=result['reviews_count'],
+                        merchant_name=result['merchant_name']
+                    )
+                    link_objects.append(link)
+                
+                if link_objects:
+                    session.add_all(link_objects)
+                    
+                # Mark item as processed
+                await session.execute(
+                    text("UPDATE items SET processed_at = :now WHERE id = :item_id"),
+                    {"now": datetime.utcnow().timestamp(), "item_id": item_id}
+                )
+        except Exception as e:
+            print(f"Error processing item {item_id}: {e}")
+            # Mark as failed by setting processed_at to a negative timestamp
+            await session.execute(
+                text("UPDATE items SET processed_at = :failed WHERE id = :item_id"),
+                {"failed": -datetime.utcnow().timestamp(), "item_id": item_id}
+            )
 
 async def poll_database():
-    global last_checked_id
-    last_checked_id = await get_last_checked_id()
-
+    """Poll database with improved reliability and batching"""
+    batch_size = 5  # Adjust based on your needs
+    
     while True:
         try:
-            # Create a new session and explicitly use the connection for reading
             async with get_session() as session:
                 async with session.begin():
-                    connection = await session.connection()
+                    # Get unprocessed items
                     query = text("""
-                    SELECT id, search 
-                    FROM items 
-                    WHERE id > :last_checked_id
+                        SELECT id, search 
+                        FROM items 
+                        WHERE processed_at IS NULL
+                        ORDER BY id
+                        LIMIT :batch_size
+                        FOR UPDATE SKIP LOCKED
                     """)
-                    result = await connection.execute(query, {"last_checked_id": last_checked_id})
-                    new_records = result.fetchall()
-                    last_checked_id = max(record[0] for record in new_records) if new_records else last_checked_id
-                    print(f"Last checked id: {last_checked_id}")
-                    print(f"New records: {new_records}")
-
-            if new_records:
-                async with get_session() as session:
-                    async with session.begin():
-                        for record in new_records:
-                            item_id, search = record
-                            processed_search = await oxy_search(search)
-
-                            # Add new links to the `links` table
-                            for result in processed_search:
-                                print("Adding link")
-                                if not result.get('url'):
-                                    continue
-                                try:
-                                    new_link = Link(
-                                        item_id=item_id,
-                                        url=result['url'],
-                                        title=result['title'],
-                                        photo_url=result['thumbnail'],
-                                        price=result['price_str'],
-                                        rating=result['rating'],
-                                        reviews_count=result['reviews_count'],
-                                        merchant_name=result['merchant_name']
-                                    )
-                                    session.add(new_link)
-                                except Exception as e:
-                                    print(f"Error adding new link: {e}")
-                                print("Link added")
+                    
+                    result = await session.execute(query, {"batch_size": batch_size})
+                    items = result.fetchall()
+                    
+                    if not items:
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    await process_item_batch(items, session)
+                    await session.commit()
+                    
         except Exception as e:
             print(f"Error during database polling: {e}")
-        finally:
             await asyncio.sleep(1)
+
+async def retry_failed_items():
+    """Periodically retry failed items"""
+    while True:
+        try:
+            async with get_session() as session:
+                async with session.begin():
+                    # Get items that failed processing (negative processed_at)
+                    query = text("""
+                        SELECT id, search 
+                        FROM items 
+                        WHERE processed_at < 0
+                        ORDER BY id
+                        LIMIT 5
+                        FOR UPDATE SKIP LOCKED
+                    """)
+                    
+                    result = await session.execute(query)
+                    items = result.fetchall()
+                    
+                    if items:
+                        await process_item_batch(items, session)
+                        await session.commit()
+                    
+        except Exception as e:
+            print(f"Error during retry: {e}")
+        finally:
+            await asyncio.sleep(60)  # Retry every minute
 
 @app.on_event("startup")
 async def startup_event():
+    # Add the processed_at column if it doesn't exist
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (
+                    SELECT 1 
+                    FROM information_schema.columns 
+                    WHERE table_name='items' AND column_name='processed_at'
+                ) THEN 
+                    ALTER TABLE items ADD COLUMN processed_at FLOAT;
+                END IF;
+            END $$;
+        """))
+    
+    # Start both the main polling and retry tasks
     asyncio.create_task(poll_database())
+    asyncio.create_task(retry_failed_items())
 
 @app.get("/")
 async def root():
