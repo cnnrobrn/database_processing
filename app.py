@@ -101,7 +101,7 @@ async def poll_database():
                                         url=result['url'],
                                         title=result['title'],
                                         photo_url=result['thumbnail'],
-                                        price=str(result['price']),
+                                        price=result['price_str'],
                                         rating=result['rating'],
                                         reviews_count=result['reviews_count'],
                                         merchant_name=result['merchant_name']
@@ -163,7 +163,7 @@ async def process_result(result):
 
     return {
         "pos": result.get("pos"),
-        "price": result.get("price"),
+        "price_str": result.get("price_str"),
         "title": result.get("title"),
         "thumbnail": result.get("thumbnail"),
         "url": seller_link,
