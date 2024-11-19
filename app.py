@@ -24,13 +24,7 @@ app = FastAPI()
 
 # Database configuration
 Base = declarative_base()
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=True,
-    pool_size=5,  # Reduced pool size for better stability
-    max_overflow=10,
-    pool_timeout=30
-)
+engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # Database Models
@@ -40,6 +34,7 @@ class Item(Base):
     outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
     description = Column(String, nullable=True)
     search = Column(String, nullable=True)
+    processed_at = Column(Float, nullable=True)
     links = relationship('Link', backref='item', lazy=True)
 
 class Link(Base):
@@ -62,57 +57,54 @@ async def get_session():
         finally:
             await session.close()
 
-async def get_last_processed_id():
-    """Get the last processed item ID from the links table"""
+async def get_last_checked_id():
     async with get_session() as session:
         try:
             query = text("SELECT COALESCE(MAX(item_id), 0) FROM links")
             result = await session.execute(query)
             return result.scalar()
         except Exception as e:
-            print(f"Error fetching last_processed_id: {e}")
+            print(f"Error fetching last_checked_id: {e}")
             return 0
 
 async def poll_database():
-    """Poll database for new items and process them sequentially"""
-    last_processed_id = await get_last_processed_id()
-    print(f"Starting processing from item_id: {last_processed_id}")
-    
+    """Poll database for new items"""
+    last_checked_id = await get_last_checked_id()
+    print(f"Starting from ID: {last_checked_id}")
+
     while True:
         try:
             async with get_session() as session:
-                # Get the next unprocessed item
+                # Get new items
                 query = text("""
-                    SELECT i.id, i.search 
-                    FROM items i
-                    LEFT JOIN links l ON i.id = l.item_id
-                    WHERE i.id > :last_id 
-                    AND l.id IS NULL
-                    AND i.search IS NOT NULL
-                    ORDER BY i.id
-                    LIMIT 1
-                    FOR UPDATE SKIP LOCKED
+                    SELECT id, search 
+                    FROM items 
+                    WHERE id > :last_id
+                    AND search IS NOT NULL
+                    ORDER BY id
+                    LIMIT 5
                 """)
                 
-                result = await session.execute(query, {"last_id": last_processed_id})
-                record = result.first()
-                
-                if not record:
+                result = await session.execute(query, {"last_id": last_checked_id})
+                new_records = result.fetchall()
+
+                if not new_records:
                     await asyncio.sleep(1)
                     continue
-                
-                item_id, search = record
-                print(f"Processing item {item_id} with search: {search}")
-                
-                try:
-                    processed_search = await oxy_search(search)
-                    if processed_search:
-                        # Begin a new transaction for inserting links
-                        async with session.begin():
-                            for result in processed_search:
-                                if not result.get('url'):
-                                    continue
-                                try:
+
+                # Process each record
+                for record in new_records:
+                    item_id, search = record
+                    print(f"Processing item {item_id}")
+                    
+                    try:
+                        processed_search = await oxy_search(search)
+                        if processed_search:
+                            # Add new links
+                            async with session.begin():
+                                for result in processed_search:
+                                    if not result.get('url'):
+                                        continue
                                     new_link = Link(
                                         item_id=item_id,
                                         url=result['url'],
@@ -124,29 +116,24 @@ async def poll_database():
                                         merchant_name=result['merchant_name']
                                     )
                                     session.add(new_link)
-                                except Exception as e:
-                                    print(f"Error creating link for item {item_id}: {e}")
-                                    continue
-                            
-                            await session.commit()
-                            print(f"Successfully processed item {item_id}")
-                            last_processed_id = item_id
-                    else:
-                        print(f"No results found for item {item_id}")
-                        last_processed_id = item_id  # Skip items with no results
-                        
-                except Exception as e:
-                    print(f"Error processing item {item_id}: {e}")
-                    await session.rollback()
-                    # Don't update last_processed_id if processing failed
-                
+                                await session.commit()
+                                print(f"Added links for item {item_id}")
+                    except Exception as e:
+                        print(f"Error processing item {item_id}: {e}")
+                        await session.rollback()
+                    
+                    # Update the last checked ID regardless of success
+                    last_checked_id = item_id
+                    
         except Exception as e:
             print(f"Error during database polling: {e}")
             await asyncio.sleep(1)
 
 async def oxy_search(query):
-    """Sends a query to the Oxylabs API and returns structured search results."""
-    print(f'oxy_search: {query}')
+    """
+    Sends a query to the Oxylabs API and returns structured search results.
+    """
+    print('oxy_search')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -167,14 +154,16 @@ async def oxy_search(query):
             records = await asyncio.gather(
                 *[process_result(result) for result in organic_results]
             )
-            print(f"Found {len(records)} results for query: {query}")
+            print(f"Found {len(records)} results")
             return records
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
 
 async def process_result(result):
-    """Process a single result to extract necessary fields and get seller link."""
+    """
+    Process a single result to extract necessary fields and get seller link.
+    """
     product_id = result.get("product_id")
     seller_link = await get_seller_link(product_id) if product_id else None
 
@@ -190,7 +179,6 @@ async def process_result(result):
     }
 
 async def get_seller_link(product_id):
-    """Get the seller link for a specific product."""
     payload = {
         'source': 'google_shopping_product',
         'domain': 'com',
@@ -210,11 +198,10 @@ async def get_seller_link(product_id):
             data = response.json()
             return get_first_seller_link(data)
     except Exception as e:
-        print(f"Error during Oxylabs API call for seller link: {e}")
+        print(f"Error during Oxylabs API call: {e}")
         return None
 
 def get_first_seller_link(data):
-    """Extract the first seller link from the API response."""
     try:
         first_result = data["results"][0]
         first_online_pricing = first_result["content"]["pricing"]["online"][0]
@@ -224,6 +211,21 @@ def get_first_seller_link(data):
 
 @app.on_event("startup")
 async def startup_event():
+    # Add the processed_at column if it doesn't exist
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (
+                    SELECT 1 
+                    FROM information_schema.columns 
+                    WHERE table_name='items' AND column_name='processed_at'
+                ) THEN 
+                    ALTER TABLE items ADD COLUMN processed_at FLOAT;
+                END IF;
+            END $$;
+        """))
+    
     asyncio.create_task(poll_database())
 
 @app.get("/")
