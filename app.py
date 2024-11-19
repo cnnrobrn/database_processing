@@ -34,7 +34,6 @@ class Item(Base):
     outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
     description = Column(String, nullable=True)
     search = Column(String, nullable=True)
-    processed_at = Column(Float, nullable=True)
     links = relationship('Link', backref='item', lazy=True)
 
 class Link(Base):
@@ -74,34 +73,35 @@ async def poll_database():
 
     while True:
         try:
+            # Get new items to process
             async with get_session() as session:
-                # Get new items
                 query = text("""
-                    SELECT id, search 
-                    FROM items 
-                    WHERE id > :last_id
-                    AND search IS NOT NULL
-                    ORDER BY id
-                    LIMIT 5
+                    SELECT i.id, i.search 
+                    FROM items i
+                    LEFT JOIN links l ON i.id = l.item_id
+                    WHERE i.id > :last_id 
+                    AND l.id IS NULL
+                    AND i.search IS NOT NULL
+                    ORDER BY i.id
+                    LIMIT 1
                 """)
                 
                 result = await session.execute(query, {"last_id": last_checked_id})
-                new_records = result.fetchall()
-
-                if not new_records:
+                record = result.first()
+                
+                if not record:
                     await asyncio.sleep(1)
                     continue
 
-                # Process each record
-                for record in new_records:
-                    item_id, search = record
-                    print(f"Processing item {item_id}")
-                    
-                    try:
-                        processed_search = await oxy_search(search)
-                        if processed_search:
-                            # Add new links
-                            async with session.begin():
+                item_id, search = record
+                print(f"Processing item {item_id} with search: {search}")
+
+                try:
+                    processed_search = await oxy_search(search)
+                    if processed_search:
+                        # Process links in a new session
+                        async with get_session() as link_session:
+                            async with link_session.begin():
                                 for result in processed_search:
                                     if not result.get('url'):
                                         continue
@@ -115,25 +115,26 @@ async def poll_database():
                                         reviews_count=result['reviews_count'],
                                         merchant_name=result['merchant_name']
                                     )
-                                    session.add(new_link)
-                                await session.commit()
-                                print(f"Added links for item {item_id}")
-                    except Exception as e:
-                        print(f"Error processing item {item_id}: {e}")
-                        await session.rollback()
+                                    link_session.add(new_link)
+                                await link_session.commit()
+                                print(f"Successfully added links for item {item_id}")
                     
-                    # Update the last checked ID regardless of success
+                    # Update last_checked_id only after successful processing
                     last_checked_id = item_id
+                    print(f"Updated last_checked_id to {last_checked_id}")
                     
+                except Exception as e:
+                    print(f"Error processing item {item_id}: {e}")
+                    # Continue to next item even if this one fails
+                    last_checked_id = item_id
+
         except Exception as e:
             print(f"Error during database polling: {e}")
             await asyncio.sleep(1)
 
 async def oxy_search(query):
-    """
-    Sends a query to the Oxylabs API and returns structured search results.
-    """
-    print('oxy_search')
+    """Sends a query to the Oxylabs API and returns structured search results."""
+    print(f'Starting oxy_search for query: {query}')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -154,16 +155,14 @@ async def oxy_search(query):
             records = await asyncio.gather(
                 *[process_result(result) for result in organic_results]
             )
-            print(f"Found {len(records)} results")
+            print(f"Found {len(records)} results for query: {query}")
             return records
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
 
 async def process_result(result):
-    """
-    Process a single result to extract necessary fields and get seller link.
-    """
+    """Process a single result to extract necessary fields and get seller link."""
     product_id = result.get("product_id")
     seller_link = await get_seller_link(product_id) if product_id else None
 
@@ -211,21 +210,6 @@ def get_first_seller_link(data):
 
 @app.on_event("startup")
 async def startup_event():
-    # Add the processed_at column if it doesn't exist
-    async with engine.begin() as conn:
-        await conn.execute(text("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name='items' AND column_name='processed_at'
-                ) THEN 
-                    ALTER TABLE items ADD COLUMN processed_at FLOAT;
-                END IF;
-            END $$;
-        """))
-    
     asyncio.create_task(poll_database())
 
 @app.get("/")
