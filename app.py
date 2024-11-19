@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Float, ForeignKey
 from sqlalchemy.sql import text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -10,7 +10,6 @@ import os
 from dotenv import load_dotenv
 import httpx
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -25,7 +24,12 @@ app = FastAPI()
 
 # Database configuration
 Base = declarative_base()
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    pool_size=5,
+    max_overflow=0  # Prevent connection overflow
+)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # Database Models
@@ -35,8 +39,6 @@ class Item(Base):
     outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
     description = Column(String, nullable=True)
     search = Column(String, nullable=True)
-    is_processing = Column(Boolean, default=False)  # New column for locking
-    processing_started = Column(Float, nullable=True)  # New column for timeout handling
     links = relationship('Link', backref='item', lazy=True)
 
 class Link(Base):
@@ -59,128 +61,84 @@ async def get_session():
         finally:
             await session.close()
 
-async def claim_next_item():
-    """Try to claim the next unprocessed item with proper locking"""
+async def get_and_process_next_item():
+    """Get and process the next available item using advisory locks"""
     async with get_session() as session:
         try:
-            # Get and lock the next available item
-            current_time = datetime.utcnow().timestamp()
-            timeout_threshold = current_time - 300  # 5 minutes timeout
-
+            # Get next item using a direct, simple query with advisory lock
             query = text("""
-                UPDATE items 
-                SET is_processing = TRUE, processing_started = :current_time
-                WHERE id = (
-                    SELECT id 
-                    FROM items 
-                    WHERE (is_processing = FALSE OR processing_started < :timeout)
+                WITH next_item AS (
+                    SELECT id, search
+                    FROM items i
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM links l WHERE l.item_id = i.id
+                    )
                     AND search IS NOT NULL
-                    AND id NOT IN (SELECT DISTINCT item_id FROM links)
                     ORDER BY id
-                    FOR UPDATE SKIP LOCKED
                     LIMIT 1
+                    FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, search;
+                SELECT id, search FROM next_item;
             """)
             
-            result = await session.execute(
-                query, 
-                {
-                    "current_time": current_time,
-                    "timeout": timeout_threshold
-                }
-            )
-            await session.commit()
-            
+            result = await session.execute(query)
             record = result.first()
-            return record if record else None
-
-        except Exception as e:
-            print(f"Error claiming item: {e}")
-            await session.rollback()
-            return None
-
-async def release_item(item_id: int, success: bool = True):
-    """Release the lock on an item"""
-    async with get_session() as session:
-        try:
-            if success:
-                # If successful, keep is_processing True to prevent reprocessing
-                query = text("""
-                    UPDATE items 
-                    SET processing_started = NULL
-                    WHERE id = :item_id
-                """)
-            else:
-                # If failed, reset the lock so it can be retried
-                query = text("""
-                    UPDATE items 
-                    SET is_processing = FALSE, processing_started = NULL
-                    WHERE id = :item_id
-                """)
-            
-            await session.execute(query, {"item_id": item_id})
-            await session.commit()
-        except Exception as e:
-            print(f"Error releasing item {item_id}: {e}")
-            await session.rollback()
-
-async def poll_database():
-    """Poll database for new items with distributed locking"""
-    while True:
-        try:
-            # Try to claim the next item
-            record = await claim_next_item()
             
             if not record:
-                await asyncio.sleep(1)
-                continue
+                return False
                 
             item_id, search = record
-            print(f"Processing item {item_id} with search: {search}")
+            print(f"Processing item {item_id}")
             
-            try:
-                processed_search = await oxy_search(search)
-                if processed_search:
-                    # Process links in a new session
-                    async with get_session() as session:
-                        async with session.begin():
-                            for result in processed_search:
-                                if not result.get('url'):
-                                    continue
-                                new_link = Link(
-                                    item_id=item_id,
-                                    url=result['url'],
-                                    title=result['title'],
-                                    photo_url=result['thumbnail'],
-                                    price=result['price_str'],
-                                    rating=result['rating'],
-                                    reviews_count=result['reviews_count'],
-                                    merchant_name=result['merchant_name']
-                                )
-                                session.add(new_link)
-                            await session.commit()
-                            print(f"Successfully added links for item {item_id}")
-                    
-                    # Mark as successfully processed
-                    await release_item(item_id, success=True)
-                else:
-                    # No results but still mark as processed
-                    await release_item(item_id, success=True)
-                    print(f"No results found for item {item_id}")
-                    
-            except Exception as e:
-                print(f"Error processing item {item_id}: {e}")
-                # Release the item for retry
-                await release_item(item_id, success=False)
+            # Process the item
+            processed_search = await oxy_search(search)
+            if processed_search:
+                link_objects = []
+                for result in processed_search:
+                    if not result.get('url'):
+                        continue
+                    link = Link(
+                        item_id=item_id,
+                        url=result['url'],
+                        title=result['title'],
+                        photo_url=result['thumbnail'],
+                        price=result['price_str'],
+                        rating=result['rating'],
+                        reviews_count=result['reviews_count'],
+                        merchant_name=result['merchant_name']
+                    )
+                    link_objects.append(link)
                 
+                if link_objects:
+                    session.add_all(link_objects)
+                    await session.commit()
+                    print(f"Successfully processed item {item_id}")
+                    return True
+            
+            # Even if no results, commit to release the lock
+            await session.commit()
+            return True
+            
         except Exception as e:
-            print(f"Error during database polling: {e}")
+            print(f"Error processing item: {e}")
+            await session.rollback()
+            return False
+
+async def poll_database():
+    """Poll database with simplified processing logic"""
+    while True:
+        try:
+            success = await get_and_process_next_item()
+            if not success:
+                # If no items to process, wait a bit
+                await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error in poll_database: {e}")
             await asyncio.sleep(1)
 
 async def oxy_search(query):
     """Sends a query to the Oxylabs API and returns structured search results."""
-    print(f'Starting oxy_search for query: {query}')
+    print(f'oxy_search for: {query}')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -201,7 +159,7 @@ async def oxy_search(query):
             records = await asyncio.gather(
                 *[process_result(result) for result in organic_results]
             )
-            print(f"Found {len(records)} results for query: {query}")
+            print(f"Found {len(records)} results")
             return records
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
@@ -255,29 +213,6 @@ def get_first_seller_link(data):
 
 @app.on_event("startup")
 async def startup_event():
-    # Add required columns if they don't exist
-    async with engine.begin() as conn:
-        await conn.execute(text("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name='items' AND column_name='is_processing'
-                ) THEN 
-                    ALTER TABLE items ADD COLUMN is_processing BOOLEAN DEFAULT FALSE;
-                END IF;
-                
-                IF NOT EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name='items' AND column_name='processing_started'
-                ) THEN 
-                    ALTER TABLE items ADD COLUMN processing_started FLOAT;
-                END IF;
-            END $$;
-        """))
-    
     asyncio.create_task(poll_database())
 
 @app.get("/")
