@@ -101,7 +101,7 @@ async def poll_database():
                                         url=result['url'],
                                         title=result['title'],
                                         photo_url=result['thumbnail'],
-                                        price=result['price'],
+                                        price=str(result['price']),
                                         rating=result['rating'],
                                         reviews_count=result['reviews_count'],
                                         merchant_name=result['merchant_name']
