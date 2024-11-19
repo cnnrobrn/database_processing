@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import Column, Integer, String, Float, ForeignKey
 from sqlalchemy.sql import text
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -30,11 +31,11 @@ async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession
 # Database Models
 class Item(Base):
     __tablename__ = 'items'
-    id = db.Column(db.Integer, primary_key=True)
-    outfit_id = db.Column(db.Integer, db.ForeignKey('outfits.id'), nullable=False)
-    description = db.Column(db.Text, nullable=True)  # Change to Text to handle longer descriptions
-    search = db.Column(db.Text, nullable=True)  # Change to Text to handle longer descriptions
-    links = db.relationship('Link', backref='item', lazy=True)
+    id = Column(Integer, primary_key=True)
+    outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
+    description = Column(String, nullable=True)  # Change to String to handle longer descriptions
+    search = Column(String, nullable=True)  # Change to String to handle longer descriptions
+    links = relationship('Link', backref='item', lazy=True)
 
 
 class Link(Base):
