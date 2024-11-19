@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, select
+from sqlalchemy import Column, Integer, String, Float, ForeignKey
 from sqlalchemy.sql import text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -10,8 +10,6 @@ import os
 from dotenv import load_dotenv
 import httpx
 from contextlib import asynccontextmanager
-from typing import List, Optional
-from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -29,10 +27,9 @@ Base = declarative_base()
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    pool_size=20,  # Adjust based on your needs
+    pool_size=5,  # Reduced pool size for better stability
     max_overflow=10,
-    pool_timeout=30,
-    pool_pre_ping=True  # Enable connection health checks
+    pool_timeout=30
 )
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -43,7 +40,6 @@ class Item(Base):
     outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
     description = Column(String, nullable=True)
     search = Column(String, nullable=True)
-    processed_at = Column(Float, nullable=True)  # New column to track processing
     links = relationship('Link', backref='item', lazy=True)
 
 class Link(Base):
@@ -66,142 +62,91 @@ async def get_session():
         finally:
             await session.close()
 
-async def process_item_batch(items: List[Item], session: AsyncSession):
-    """Process a batch of items concurrently while maintaining order"""
-    tasks = []
-    for item in items:
-        if not item.search:
-            continue
-        task = asyncio.create_task(oxy_search(item.search))
-        tasks.append((item.id, task))
-    
-    for item_id, task in tasks:
+async def get_last_processed_id():
+    """Get the last processed item ID from the links table"""
+    async with get_session() as session:
         try:
-            search_results = await task
-            if search_results:
-                # Add all links in a single transaction
-                link_objects = []
-                for result in search_results:
-                    if not result.get('url'):
-                        continue
-                    link = Link(
-                        item_id=item_id,
-                        url=result['url'],
-                        title=result['title'],
-                        photo_url=result['thumbnail'],
-                        price=result['price_str'],
-                        rating=result['rating'],
-                        reviews_count=result['reviews_count'],
-                        merchant_name=result['merchant_name']
-                    )
-                    link_objects.append(link)
-                
-                if link_objects:
-                    session.add_all(link_objects)
-                    
-                # Mark item as processed
-                await session.execute(
-                    text("UPDATE items SET processed_at = :now WHERE id = :item_id"),
-                    {"now": datetime.utcnow().timestamp(), "item_id": item_id}
-                )
+            query = text("SELECT COALESCE(MAX(item_id), 0) FROM links")
+            result = await session.execute(query)
+            return result.scalar()
         except Exception as e:
-            print(f"Error processing item {item_id}: {e}")
-            # Mark as failed by setting processed_at to a negative timestamp
-            await session.execute(
-                text("UPDATE items SET processed_at = :failed WHERE id = :item_id"),
-                {"failed": -datetime.utcnow().timestamp(), "item_id": item_id}
-            )
+            print(f"Error fetching last_processed_id: {e}")
+            return 0
 
 async def poll_database():
-    """Poll database with improved reliability and batching"""
-    batch_size = 5  # Adjust based on your needs
+    """Poll database for new items and process them sequentially"""
+    last_processed_id = await get_last_processed_id()
+    print(f"Starting processing from item_id: {last_processed_id}")
     
     while True:
         try:
             async with get_session() as session:
-                async with session.begin():
-                    # Get unprocessed items
-                    query = text("""
-                        SELECT id, search 
-                        FROM items 
-                        WHERE processed_at IS NULL
-                        ORDER BY id
-                        LIMIT :batch_size
-                        FOR UPDATE SKIP LOCKED
-                    """)
-                    
-                    result = await session.execute(query, {"batch_size": batch_size})
-                    items = result.fetchall()
-                    
-                    if not items:
-                        await asyncio.sleep(1)
-                        continue
-                    
-                    await process_item_batch(items, session)
-                    await session.commit()
-                    
+                # Get the next unprocessed item
+                query = text("""
+                    SELECT i.id, i.search 
+                    FROM items i
+                    LEFT JOIN links l ON i.id = l.item_id
+                    WHERE i.id > :last_id 
+                    AND l.id IS NULL
+                    AND i.search IS NOT NULL
+                    ORDER BY i.id
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                """)
+                
+                result = await session.execute(query, {"last_id": last_processed_id})
+                record = result.first()
+                
+                if not record:
+                    await asyncio.sleep(1)
+                    continue
+                
+                item_id, search = record
+                print(f"Processing item {item_id} with search: {search}")
+                
+                try:
+                    processed_search = await oxy_search(search)
+                    if processed_search:
+                        # Begin a new transaction for inserting links
+                        async with session.begin():
+                            for result in processed_search:
+                                if not result.get('url'):
+                                    continue
+                                try:
+                                    new_link = Link(
+                                        item_id=item_id,
+                                        url=result['url'],
+                                        title=result['title'],
+                                        photo_url=result['thumbnail'],
+                                        price=result['price_str'],
+                                        rating=result['rating'],
+                                        reviews_count=result['reviews_count'],
+                                        merchant_name=result['merchant_name']
+                                    )
+                                    session.add(new_link)
+                                except Exception as e:
+                                    print(f"Error creating link for item {item_id}: {e}")
+                                    continue
+                            
+                            await session.commit()
+                            print(f"Successfully processed item {item_id}")
+                            last_processed_id = item_id
+                    else:
+                        print(f"No results found for item {item_id}")
+                        last_processed_id = item_id  # Skip items with no results
+                        
+                except Exception as e:
+                    print(f"Error processing item {item_id}: {e}")
+                    await session.rollback()
+                    # Don't update last_processed_id if processing failed
+                
         except Exception as e:
             print(f"Error during database polling: {e}")
             await asyncio.sleep(1)
 
-async def retry_failed_items():
-    """Periodically retry failed items"""
-    while True:
-        try:
-            async with get_session() as session:
-                async with session.begin():
-                    # Get items that failed processing (negative processed_at)
-                    query = text("""
-                        SELECT id, search 
-                        FROM items 
-                        WHERE processed_at < 0
-                        ORDER BY id
-                        LIMIT 5
-                        FOR UPDATE SKIP LOCKED
-                    """)
-                    
-                    result = await session.execute(query)
-                    items = result.fetchall()
-                    
-                    if items:
-                        await process_item_batch(items, session)
-                        await session.commit()
-                    
-        except Exception as e:
-            print(f"Error during retry: {e}")
-        finally:
-            await asyncio.sleep(60)  # Retry every minute
-
-@app.on_event("startup")
-async def startup_event():
-    # Add the processed_at column if it doesn't exist
-    async with engine.begin() as conn:
-        await conn.execute(text("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (
-                    SELECT 1 
-                    FROM information_schema.columns 
-                    WHERE table_name='items' AND column_name='processed_at'
-                ) THEN 
-                    ALTER TABLE items ADD COLUMN processed_at FLOAT;
-                END IF;
-            END $$;
-        """))
-    
-    # Start both the main polling and retry tasks
-    asyncio.create_task(poll_database())
-    asyncio.create_task(retry_failed_items())
-
-@app.get("/")
-async def root():
-    return {"message": "Polling the database for new records in the items table"}
-
 async def oxy_search(query):
-    """
-    Sends a query to the Oxylabs API and returns structured search results.
-    """
-    print('oxy_search')
+    """Sends a query to the Oxylabs API and returns structured search results."""
+    print(f'oxy_search: {query}')
     payload = {
         'source': 'google_shopping_search',
         'domain': 'com',
@@ -222,16 +167,14 @@ async def oxy_search(query):
             records = await asyncio.gather(
                 *[process_result(result) for result in organic_results]
             )
-            print(records)
+            print(f"Found {len(records)} results for query: {query}")
             return records
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
         return []
 
 async def process_result(result):
-    """
-    Process a single result to extract necessary fields and get seller link.
-    """
+    """Process a single result to extract necessary fields and get seller link."""
     product_id = result.get("product_id")
     seller_link = await get_seller_link(product_id) if product_id else None
 
@@ -246,17 +189,8 @@ async def process_result(result):
         "merchant_name": result.get("merchant", {}).get("name"),
     }
 
-async def get_last_checked_id():
-    async with get_session() as session:
-        try:
-            query = text("SELECT COALESCE(MAX(item_id), 0) FROM links").execution_options(isolation_level="AUTOCOMMIT")
-            result = await session.execute(query)
-            return result.scalar()
-        except Exception as e:
-            print(f"Error fetching last_checked_id: {e}")
-            return 0
-
 async def get_seller_link(product_id):
+    """Get the seller link for a specific product."""
     payload = {
         'source': 'google_shopping_product',
         'domain': 'com',
@@ -276,13 +210,22 @@ async def get_seller_link(product_id):
             data = response.json()
             return get_first_seller_link(data)
     except Exception as e:
-        print(f"Error during Oxylabs API call: {e}")
+        print(f"Error during Oxylabs API call for seller link: {e}")
         return None
 
 def get_first_seller_link(data):
+    """Extract the first seller link from the API response."""
     try:
         first_result = data["results"][0]
         first_online_pricing = first_result["content"]["pricing"]["online"][0]
         return first_online_pricing.get("seller_link")
     except (KeyError, IndexError):
         return None
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(poll_database())
+
+@app.get("/")
+async def root():
+    return {"message": "Polling the database for new records in the items table"}
