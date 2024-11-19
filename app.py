@@ -21,13 +21,14 @@ OXY_PASSWORD = os.getenv("OXY_PASSWORD")
 # FastAPI app instance
 app = FastAPI()
 
+
 # Database configuration
 Base = declarative_base()
 engine = create_async_engine(DATABASE_URL, echo=True)
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # Database Models
-class Item(db.Model):
+class Item(Base):
     __tablename__ = 'items'
     id = db.Column(db.Integer, primary_key=True)
     outfit_id = db.Column(db.Integer, db.ForeignKey('outfits.id'), nullable=False)
