@@ -28,7 +28,7 @@ engine = create_async_engine(
     DATABASE_URL,
     echo=True,
     pool_size=5,
-    max_overflow=0  # Prevent connection overflow
+    max_overflow=0
 )
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -61,16 +61,24 @@ async def get_session():
         finally:
             await session.close()
 
-async def get_and_process_next_item():
-    """Get and process the next available item using advisory locks"""
+async def get_max_processed_id():
+    """Get the highest processed item_id"""
+    async with get_session() as session:
+        query = text("SELECT COALESCE(MAX(item_id), 0) FROM links")
+        result = await session.execute(query)
+        return result.scalar()
+
+async def get_and_process_next_item(last_processed_id: int):
+    """Get and process the next available item after the last processed ID"""
     async with get_session() as session:
         try:
-            # Get next item using a direct, simple query with advisory lock
+            # Get next unprocessed item after last_processed_id
             query = text("""
                 WITH next_item AS (
                     SELECT id, search
                     FROM items i
-                    WHERE NOT EXISTS (
+                    WHERE id > :last_id
+                    AND NOT EXISTS (
                         SELECT 1 FROM links l WHERE l.item_id = i.id
                     )
                     AND search IS NOT NULL
@@ -81,14 +89,14 @@ async def get_and_process_next_item():
                 SELECT id, search FROM next_item;
             """)
             
-            result = await session.execute(query)
+            result = await session.execute(query, {"last_id": last_processed_id})
             record = result.first()
             
             if not record:
-                return False
+                return last_processed_id, False
                 
             item_id, search = record
-            print(f"Processing item {item_id}")
+            print(f"Processing item {item_id} (after {last_processed_id})")
             
             # Process the item
             processed_search = await oxy_search(search)
@@ -113,22 +121,26 @@ async def get_and_process_next_item():
                     session.add_all(link_objects)
                     await session.commit()
                     print(f"Successfully processed item {item_id}")
-                    return True
+                    return item_id, True
             
             # Even if no results, commit to release the lock
             await session.commit()
-            return True
+            return item_id, True
             
         except Exception as e:
             print(f"Error processing item: {e}")
             await session.rollback()
-            return False
+            return last_processed_id, False
 
 async def poll_database():
-    """Poll database with simplified processing logic"""
+    """Poll database with progressive processing"""
+    # Start from the highest processed ID
+    last_processed_id = await get_max_processed_id()
+    print(f"Starting from last processed ID: {last_processed_id}")
+
     while True:
         try:
-            success = await get_and_process_next_item()
+            last_processed_id, success = await get_and_process_next_item(last_processed_id)
             if not success:
                 # If no items to process, wait a bit
                 await asyncio.sleep(1)
@@ -155,10 +167,22 @@ async def oxy_search(query):
                 json=payload
             )
             data = response.json()
+            
+            # Add error checking for the response
+            if 'results' not in data:
+                print(f"Unexpected API response: {data}")
+                return []
+                
             organic_results = data["results"][0]["content"]["results"]["organic"][:30]
-            records = await asyncio.gather(
-                *[process_result(result) for result in organic_results]
-            )
+            
+            # Process results concurrently but with a small delay to avoid rate limits
+            tasks = []
+            for result in organic_results:
+                task = asyncio.create_task(process_result(result))
+                tasks.append(task)
+                await asyncio.sleep(0.1)  # Small delay between API calls
+                
+            records = await asyncio.gather(*tasks)
             print(f"Found {len(records)} results")
             return records
     except Exception as e:
@@ -198,6 +222,9 @@ async def get_seller_link(product_id):
                 json=payload
             )
             data = response.json()
+            if 'results' not in data:
+                print(f"Unexpected API response for seller link: {data}")
+                return None
             return get_first_seller_link(data)
     except Exception as e:
         print(f"Error during Oxylabs API call: {e}")
@@ -217,4 +244,4 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"message": "Polling the database for new records in the items table"}
+    return {"message": "Processing items"}
