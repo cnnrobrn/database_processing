@@ -192,14 +192,13 @@ async def oxy_search(query):
 async def process_result(result):
     """Process a single result to extract necessary fields and get seller link."""
     product_id = result.get("product_id")
-    seller_link = await get_seller_link(product_id) if product_id else None
-
+    
     return {
         "pos": result.get("pos"),
         "price_str": result.get("price_str"),
         "title": result.get("title"),
         "thumbnail": result.get("thumbnail"),
-        "url": seller_link,
+        "url": f"https://www.google.com/shopping/product/{product_id}",
         "rating": result.get("rating"),
         "reviews_count": result.get("reviews_count"),
         "merchant_name": result.get("merchant", {}).get("name"),
