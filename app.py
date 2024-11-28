@@ -10,6 +10,8 @@ import os
 from dotenv import load_dotenv
 import httpx
 from contextlib import asynccontextmanager
+from wha7_models import get_async_session, PhoneNumber, Outfit, Item, Link
+from fastapi import FastAPI, Depends
 
 # Load environment variables
 load_dotenv()
@@ -32,26 +34,6 @@ engine = create_async_engine(
 )
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-# Database Models
-class Item(Base):
-    __tablename__ = 'items'
-    id = Column(Integer, primary_key=True)
-    outfit_id = Column(Integer, ForeignKey('outfits.id'), nullable=False)
-    description = Column(String, nullable=True)
-    search = Column(String, nullable=True)
-    links = relationship('Link', backref='item', lazy=True)
-
-class Link(Base):
-    __tablename__ = 'links'
-    id = Column(Integer, primary_key=True)
-    item_id = Column(Integer, ForeignKey('items.id'), nullable=False)
-    photo_url = Column(String, nullable=True)
-    url = Column(String, nullable=False)
-    price = Column(String, nullable=True)
-    title = Column(String, nullable=False)
-    rating = Column(Float, nullable=True)
-    reviews_count = Column(Integer, nullable=True)
-    merchant_name = Column(String, nullable=True)
 
 @asynccontextmanager
 async def get_session():
