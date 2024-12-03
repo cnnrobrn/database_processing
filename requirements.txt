@@ -7,3 +7,4 @@ requests
 gunicorn
 httpx
 git+https://${GITHUB_TOKEN}@github.com/cnnrobrn/wha7-models.git@main
+flask_sqlalchemy
